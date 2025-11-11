@@ -1,4 +1,5 @@
 using Moq;
+using SimpleMapper.Core.Binding;
 
 namespace SimpleMapper.Core.Tests;
 
@@ -10,7 +11,11 @@ public class MapperTests
 
     public MapperTests()
     {
-        _builder = new MappingBuilder();
+        _builder = new MappingBuilder([
+            new DirectBindingStrategy(),
+            new ComplexBindingStrategy(),
+            new CollectionBindingStrategy(),
+            new UnsupportedBindingStrategy()]);
         _registry = new MappingRegistry(_builder);
         _mapper = new Mapper(_registry);
     }

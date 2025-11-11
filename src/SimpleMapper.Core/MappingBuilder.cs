@@ -1,12 +1,19 @@
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using System.Reflection;
+using SimpleMapper.Core.Binding;
 
 namespace SimpleMapper.Core;
 
 public class MappingBuilder : IMappingBuilder
 {
+    private readonly IReadOnlyDictionary<MappingKind, IBindingStrategy> _strategies;
     private readonly ConcurrentDictionary<(Type Source, Type Destination), LambdaExpression> _expressionCache = new();
+
+    public MappingBuilder(IEnumerable<IBindingStrategy> strategies)
+    {
+        _strategies = strategies.ToDictionary(s => s.Kind);
+    }
 
     public Func<TSource, TDestination> BuildMapping<TSource, TDestination>()
     {
@@ -15,7 +22,7 @@ public class MappingBuilder : IMappingBuilder
         return (Func<TSource, TDestination>)lambda.Compile();
     }
 
-    private LambdaExpression GetOrBuildMappingExpression(Type sourceType, Type destinationType)
+    internal LambdaExpression GetOrBuildMappingExpression(Type sourceType, Type destinationType)
     {
         return _expressionCache.GetOrAdd((sourceType, destinationType), _ =>
         {
@@ -52,32 +59,16 @@ public class MappingBuilder : IMappingBuilder
             return Expression.Bind(destProp, Expression.Default(destProp.PropertyType));
         }
 
-        if (AreTypesCompatible(destProp.PropertyType, sourceProp.PropertyType))
+        var descriptor = MappingDescriptor.From(sourceProp.PropertyType, destProp.PropertyType);
+
+        if (!_strategies.TryGetValue(descriptor.Kind, out var strategy))
         {
-            return Expression.Bind(destProp, Expression.Property(sourceParameter, sourceProp));
+            throw new BindingStrategyNotFoundException(descriptor.SourceType, descriptor.DestinationType);
         }
 
-        if (IsComplexType(destProp.PropertyType))
-        {
-            var nestedLambda = GetOrBuildMappingExpression(sourceProp.PropertyType, destProp.PropertyType);
-
-            if (!sourceProp.PropertyType.IsValueType || Nullable.GetUnderlyingType(sourceProp.PropertyType) != null)
-            {
-                var nullCheck = Expression.Condition(
-                    Expression.Equal(Expression.Property(sourceParameter, sourceProp), Expression.Constant(null, sourceProp.PropertyType)),
-                    Expression.Default(destProp.PropertyType),
-                    Expression.Invoke(nestedLambda, Expression.Property(sourceParameter, sourceProp))
-                );
-
-                return Expression.Bind(destProp, nullCheck);
-            }
-
-            return Expression.Bind(destProp, Expression.Invoke(nestedLambda, Expression.Property(sourceParameter, sourceProp)));
-        }
-
-        return Expression.Bind(destProp, Expression.Default(destProp.PropertyType));
+        return strategy.BuildAssignment(destProp, sourceProp, sourceParameter, this);
     }
-
+    
     private static IEnumerable<PropertyInfo> GetSourceProperties(Type type) =>
         type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(p => p.CanRead);
@@ -85,17 +76,4 @@ public class MappingBuilder : IMappingBuilder
     private static IEnumerable<PropertyInfo> GetDestinationProperties(Type type) =>
         type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(p => p.CanWrite);
-
-    private static bool AreTypesCompatible(Type destinationType, Type sourceType) =>
-        destinationType.IsAssignableFrom(sourceType);
-
-    private static bool IsComplexType(Type type)
-    {
-        var underlyingType = Nullable.GetUnderlyingType(type) ?? type;
-
-        return !(underlyingType.IsPrimitive
-                 || underlyingType.IsEnum
-                 || underlyingType == typeof(string)
-                 || underlyingType == typeof(decimal));
-    }
 }
